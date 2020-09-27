@@ -36,7 +36,6 @@ proc getNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId): Option[NoPaste
   try:
     noPaste.db.select(entrys, "NoPasteEntry.noPasteId = ?", noPasteId)
   except:
-    # echo getCurrentExceptionMsg()
     return
   if entrys.len == 0: return
   return some(entrys[0])
@@ -82,13 +81,23 @@ proc newNoPasteEntry(name, content: string, howLongValid:int = 1, volatile = fal
   result.nopasteId = genNoPasteId(result.dateCreation)
 
 ##### Render functions
+proc computeHowLongValidStr(dateCreation, howLongValid: float): string {.inline.} =
+  result = ""
+  try:
+    result = $fromUnixFloat(dateCreation + howLongValid.float)
+  except:
+    result = $fromUnixFloat(int32.high.float) # float.high is invalid here, does not matter, we just need a very high number
+
+proc computeFromTo(entry: NoPasteEntry): string =
+  if entry.volatile: return "volatile (one get)"
+  $entry.dateCreation.fromUnixFloat() & " until " & computeHowLongValidStr(entry.dateCreation, entry.howLongValid.float)
 
 proc render(entry: NoPasteEntry): VNode =
   result = buildHtml(tdiv):
     h1:
       text entry.name
     tdiv:
-      text entry.noPasteId & " " & $entry.dateCreation.fromUnixFloat()
+      text entry.noPasteId & " " & computeFromTo(entry)
     tdiv:
       a(href = "/raw/" & entry.noPasteId):
         text "[raw]"
@@ -103,7 +112,7 @@ proc render(noPasteEntries: seq[NoPasteEntry]): VNode =
     for entry in noPasteEntries:
       tdiv(class="entry"):
         a(href = "/get/" & entry.noPasteId):
-          text fmt"-> {entry.name} " & $entry.dateCreation.fromUnixFloat()
+          text fmt"-> {entry.name} " & computeFromTo(entry)
         a(href = "/raw/" & entry.noPasteId):
           text "[raw]"
         a(href = "/delete/" & entry.noPasteId, class="delete"):
@@ -115,7 +124,6 @@ proc renderMenu(): VNode =
     a(href = "/add"): text "add"
     a(href = "/deleteAll", class = "delete"): text "deleteAll"
 
-
 proc master(content: VNode): VNode =
   result = buildHtml(html):
     head:
@@ -124,7 +132,6 @@ proc master(content: VNode): VNode =
       renderMenu()
       content
 
-# Async Function
 proc home*(noPaste: NoPaste, ctx: Context) {.async.} =
   var outp = ""
   resp $master(noPaste.getAllNopasteEntry().render())
@@ -143,7 +150,6 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
     # resp redirect("/get/" & entry.noPasteId)
     resp redirect("/")
   else:
-    var outp = ""
     var vnode = buildHtml(tdiv):
       form(`method` = "post"):
         select(name = "howLongValid", id = "howLongValid"):
@@ -194,50 +200,30 @@ proc deleteAll*(noPaste: NoPaste, ctx: Context) {.async.} =
   noPaste.deleteAllEntries
   resp redirect("/")
 
-
 proc doCleanup(noPaste: NoPaste) {.async.} =
   while true:
-    # echo "cleanup"
     noPaste.deleteExpiredEntries()
-    await sleepAsync(10_000)
+    await sleepAsync(initDuration(minutes = 5).inMilliseconds().int)
 
-var noPaste = newNoPaste()
-noPaste.init()
-# block:
-#   var ee = newNoPasteEntry("foooo", "baaaa", howLongValid = int.high)
-#   noPaste.db.insert(ee)
-# block:
-#   var ee = newNoPasteEntry("foooo", "baaaa", howLongValid = int.high)
-#   noPaste.db.insert(ee)
-# block:
-#   var ee = newNoPasteEntry("foooo", "baaaa", howLongValid = int.high)
-#   noPaste.db.insert(ee)
-# block:
-#   var ee = newNoPasteEntry("foooo", "baaaa", howLongValid = int.high)
-#   noPaste.db.insert(ee)
+proc main() =
+  var debug = true
+  if defined release: debug = false
+  var noPaste = newNoPaste()
+  noPaste.init()
+  var middlewares: seq[HandlerAsync] = @[]
+  let settings = newSettings(appName = "NoPaste", debug = debug)
+  if debug:
+    middlewares.add debugRequestMiddleware()
+  var app = newApp(settings = settings, errorHandlerTable=newErrorHandlerTable(), middlewares = middlewares)
+  app.addRoute("/", proc (ctx: Context): Future[void] {.gcsafe.} = home(noPaste, ctx), @[HttpGet, HttpPost])
+  app.addRoute("/add", proc (ctx: Context): Future[void] {.gcsafe.} = add(noPaste, ctx), @[HttpGet, HttpPost])
+  app.addRoute("/raw/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = raw(noPaste, ctx), HttpGet)
+  app.addRoute("/get/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = get(noPaste, ctx), HttpGet)
+  app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet)
+  app.addRoute("/deleteAll", proc (ctx: Context): Future[void] {.gcsafe.} = deleteAll(noPaste, ctx), HttpGet)
+  asyncCheck noPaste.doCleanup()
+  app.run()
 
-let settings = newSettings(appName = "NoPaste", debug = false)
-# var app = newApp(settings = settings, middlewares = @[debugRequestMiddleware()])
-var app = newApp(settings = settings, errorHandlerTable=newErrorHandlerTable())
-app.addRoute("/", proc (ctx: Context): Future[void] {.gcsafe.} = home(noPaste, ctx), @[HttpGet, HttpPost])
-app.addRoute("/add", proc (ctx: Context): Future[void] {.gcsafe.} = add(noPaste, ctx), @[HttpGet, HttpPost])
-app.addRoute("/raw/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = raw(noPaste, ctx), HttpGet)
-app.addRoute("/get/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = get(noPaste, ctx), HttpGet)
-app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet)
-app.addRoute("/deleteAll", proc (ctx: Context): Future[void] {.gcsafe.} = deleteAll(noPaste, ctx), HttpGet)
 
-asyncCheck noPaste.doCleanup()
-app.run()
-#### WEBSERVER END
-# when isMainModule and false:
-#   var noPaste = newNoPaste()
-#   noPaste.init()
-
-#   var ee = newNoPasteEntry("foooo", "baaaa")
-#   noPaste.db.insert(ee)
-
-#   # for xx in noPaste.getAllNopasteEntry(): echo xx[]
-#   echo "Expired:"
-#   for xx in noPaste.getExpiredEntries(): echo xx[]
-#   noPaste.deleteExpiredEntries()
-#   noPaste.updateNopasteEntryById(ee.noPasteId, "RAX", "REX")
+when isMainModule:
+  main()
