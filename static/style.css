@@ -1,0 +1,30 @@
+body {
+  font-family: monospace;
+}
+
+#menu {
+  margin-bottom: 5px;
+  border-bottom: solid 3px;
+}
+
+#name {
+  width: 100%;
+}
+
+#content {
+  width: 100%;
+  height: 90%
+}
+
+.delete {
+  position: absolute;
+  right: 10px;
+  color: red;
+}
+
+.entry {
+  border-bottom: dotted 1px;
+}
+
+.entry:nth-child(even) {background: #CCC}
+.entry:nth-child(odd) {background: #FFF}
