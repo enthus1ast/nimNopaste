@@ -112,15 +112,14 @@ proc renderFilePreview(entry: NoPasteEntry): VNode =
     case ext
     of ".gif", ".png", ".jpeg", ".jpg":
       img(src = entry.getUploadUri())
-    of ".mp3", ".ogg", ".wav":
+    of ".mp3", ".ogg", ".wav", ".opus":
       audio:
         source(src = entry.getUploadUri())
     of ".mp4":
       video:
         source(src = entry.getUploadUri())
-    of ".txt":
+    of ".txt", ".json", ".jsonl":
       iframe(src = entry.getUploadUri())
-
     else:
       discard
 

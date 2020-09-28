@@ -1,0 +1,12 @@
+[Unit]
+AssertPathExists=/home/noPaste/noPaste
+
+[Service]
+WorkingDirectory=/home/noPaste/noPaste
+ExecStart=/home/noPaste/noPaste/nopaste
+Restart=always
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
