@@ -118,6 +118,9 @@ proc renderFilePreview(entry: NoPasteEntry): VNode =
     of ".mp4":
       video:
         source(src = entry.getUploadUri())
+    of ".txt":
+      iframe(src = entry.getUploadUri())
+
     else:
       discard
 
@@ -176,6 +179,12 @@ proc home*(noPaste: NoPaste, ctx: Context) {.async.} =
 template getFormParam(ctx: Context, key: string): string =
   ctx.request.formParams.data[key].body
 
+template hasUploadedFile(ctx: Context, key: string): bool =
+  ctx.request.formParams.data.hasKey(key)
+
+func empty(entry: NoPasteEntry): bool =
+  result = (entry.name.len == 0) and (entry.content.len == 0) and (entry.uploadFile.len == 0)
+
 proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
   case ctx.request.reqMethod
   of HttpPost:
@@ -185,22 +194,24 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
       howLongValid = parseInt(ctx.getFormParam("howLongValid"))
     except:
       echo getCurrentExceptionMsg()
-      discard
+      resp "howLongValid not valid ;)", Http400
+      return
     if howLongValid == -1: volatile = true
     var entry = newNoPasteEntry(ctx.getFormParam("name"), ctx.getFormParam("content"), howLongValid = howLongValid, volatile = volatile)
 
-    try:
-      var file = ctx.getUploadFile("upload")
-      let entryFolder = uploadDir / entry.noPasteId
-      if not dirExists(entryFolder): createDir(entryFolder)
-      file.save(dir = entryFolder)
-      entry.uploadFile = file.filename
-    except:
-      echo "upload file not saved / or none there"
-      echo getCurrentExceptionMsg()
-
-    noPaste.db.insert(entry)
-    # resp redirect("/get/" & entry.noPasteId)
+    if ctx.hasUploadedFile("upload"):
+      try:
+        var file = ctx.getUploadFile("upload")
+        let entryFolder = uploadDir / entry.noPasteId
+        if not dirExists(entryFolder): createDir(entryFolder)
+        file.save(dir = entryFolder)
+        entry.uploadFile = file.filename
+      except:
+        echo "upload file not saved / or none there"
+        echo getCurrentExceptionMsg()
+    if not entry.empty():
+      noPaste.db.insert(entry)
+    # resp redirect("/get/" & entry.noPasteId) # cannot do this because of volatile, would be deleted instantly
     resp redirect("/")
   of HttpGet:
     var vnode = buildHtml(tdiv):
@@ -217,7 +228,7 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
           discard
         textarea(name = "content", id = "content", placeholder = "content"):
           discard
-        input(name = "upload", id = "upload", `type` = "file")
+        input(`name` = "upload", id = "upload", `type` = "file")
         button(id="mysubmit"):
           text "submit"
     resp $master(vnode)
