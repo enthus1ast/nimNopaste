@@ -8,6 +8,8 @@ import karax / [kbase, vdom, karaxdsl]
 import times
 
 const HASH_ID_SALT = "Some salt or pepper?"
+let uploadDir = getAppDir() / "static" / "uploads"
+
 type
   NoPasteId = string
   NoPasteEntry = ref object of Model
@@ -17,6 +19,7 @@ type
     dateCreation: float
     howLongValid: int
     volatile: bool ## remove after first get
+    uploadFile: string
   NoPaste = ref object
     db: DbConn
 
@@ -26,6 +29,7 @@ func newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
 
 proc init(noPaste: NoPaste) =
   noPaste.db.createTables(NoPasteEntry())
+  if not dirExists(uploadDir): createDir(uploadDir)
 
 proc getAllNopasteEntry(noPaste: NoPaste): seq[NoPasteEntry] =
   result = @[NoPasteEntry()]
@@ -40,6 +44,9 @@ proc getNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId): Option[NoPaste
   if entrys.len == 0: return
   return some(entrys[0])
 
+proc deleteUploadFile(noPaste: NoPaste, noPasteId: NoPasteId) =
+  removeDir(uploadDir / nopasteId)
+
 proc genNoPasteId(dateCreation: float): string =
   var hashids = createHashids(HASH_ID_SALT)
   let (intpart, floatpart) = splitDecimal(dateCreation)
@@ -53,10 +60,12 @@ proc getExpiredEntries(noPaste: NoPaste): seq[NoPasteEntry] =
 
 proc deleteExpiredEntries(noPaste: NoPaste) =
   for entry in noPaste.getExpiredEntries():
+    noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(dup(entry))
 
 proc deleteAllEntries(noPaste: NoPaste) =
   for entry in noPaste.getAllNopasteEntry():
+    noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(dup(entry))
 
 proc updateNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId, name, content: string) =
@@ -69,6 +78,7 @@ proc updateNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId, name, conten
 proc delete(noPaste: NoPaste, noPasteId: NoPasteId) =
   var entry = NoPasteEntry()
   noPaste.db.select(entry, "NoPasteEntry.noPasteId = ?", noPasteId)
+  noPaste.deleteUploadFile(entry.nopasteId)
   noPaste.db.delete(entry)
 
 proc newNoPasteEntry(name, content: string, howLongValid:int = 1, volatile = false): NoPasteEntry = # 60 * 60 * 24 * 28
@@ -81,6 +91,9 @@ proc newNoPasteEntry(name, content: string, howLongValid:int = 1, volatile = fal
   result.nopasteId = genNoPasteId(result.dateCreation)
 
 ##### Render functions
+proc getUploadUri(entry: NoPasteEntry): string =
+  "/static/uploads" / entry.nopasteId / entry.uploadFile
+
 proc computeHowLongValidStr(dateCreation, howLongValid: float): string {.inline.} =
   result = ""
   try:
@@ -91,6 +104,22 @@ proc computeHowLongValidStr(dateCreation, howLongValid: float): string {.inline.
 proc computeFromTo(entry: NoPasteEntry): string =
   if entry.volatile: return "volatile (one get)"
   $entry.dateCreation.fromUnixFloat() & " until " & computeHowLongValidStr(entry.dateCreation, entry.howLongValid.float)
+
+proc renderFilePreview(entry: NoPasteEntry): VNode =
+  if entry.uploadFile.len == 0: return
+  let ext = entry.uploadFile.splitFile().ext.toLowerAscii()
+  result = buildHtml(tdiv):
+    case ext
+    of ".gif", ".png", ".jpeg", ".jpg":
+      img(src = entry.getUploadUri())
+    of ".mp3", ".ogg", ".wav":
+      audio:
+        source(src = entry.getUploadUri())
+    of ".mp4":
+      video:
+        source(src = entry.getUploadUri())
+    else:
+      discard
 
 proc render(entry: NoPasteEntry): VNode =
   result = buildHtml(tdiv):
@@ -103,6 +132,11 @@ proc render(entry: NoPasteEntry): VNode =
         text "[raw]"
       a(href = "/delete/" & entry.noPasteId, class="delete"):
         text "[delete]"
+    if entry.uploadFile.len > 0:
+      tdiv:
+        a(href = entry.getUploadUri()):
+          text entry.uploadFile
+        entry.renderFilePreview()
     hr()
     pre:
       text entry.content
@@ -115,6 +149,9 @@ proc render(noPasteEntries: seq[NoPasteEntry]): VNode =
           text fmt"-> {entry.name} " & computeFromTo(entry)
         a(href = "/raw/" & entry.noPasteId):
           text "[raw]"
+        if entry.uploadFile.len > 0:
+          a(href = noPaste.getUploadUri(entry)):
+            text "[download]"
         a(href = "/delete/" & entry.noPasteId, class="delete"):
           text "[delete]"
 
@@ -136,22 +173,38 @@ proc home*(noPaste: NoPaste, ctx: Context) {.async.} =
   var outp = ""
   resp $master(noPaste.getAllNopasteEntry().render())
 
+template getFormParam(ctx: Context, key: string): string =
+  ctx.request.formParams.data[key].body
+
 proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
-  if ctx.request.reqMethod == HttpPost:
+  case ctx.request.reqMethod
+  of HttpPost:
     var howLongValid = 0
     var volatile = false
     try:
-      howLongValid = parseInt(ctx.getPostParams("howLongValid"))
+      howLongValid = parseInt(ctx.getFormParam("howLongValid"))
     except:
+      echo getCurrentExceptionMsg()
       discard
     if howLongValid == -1: volatile = true
-    var entry = newNoPasteEntry(ctx.getPostParams("name"), ctx.getPostParams("content"), howLongValid = howLongValid, volatile = volatile)
+    var entry = newNoPasteEntry(ctx.getFormParam("name"), ctx.getFormParam("content"), howLongValid = howLongValid, volatile = volatile)
+
+    try:
+      var file = ctx.getUploadFile("upload")
+      let entryFolder = uploadDir / entry.noPasteId
+      if not dirExists(entryFolder): createDir(entryFolder)
+      file.save(dir = entryFolder)
+      entry.uploadFile = file.filename
+    except:
+      echo "upload file not saved / or none there"
+      echo getCurrentExceptionMsg()
+
     noPaste.db.insert(entry)
     # resp redirect("/get/" & entry.noPasteId)
     resp redirect("/")
-  else:
+  of HttpGet:
     var vnode = buildHtml(tdiv):
-      form(`method` = "post"):
+      form(`method` = "post", enctype = "multipart/form-data"):
         select(name = "howLongValid", id = "howLongValid"):
           option(value = $int.high): text "forever"
           option(value = $initDuration(weeks = 4).inSeconds): text "one month"
@@ -164,12 +217,16 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
           discard
         textarea(name = "content", id = "content", placeholder = "content"):
           discard
+        input(name = "upload", id = "upload", `type` = "file")
         button(id="mysubmit"):
           text "submit"
     resp $master(vnode)
+  else:
+    discard
 
 proc deleteIfVolatile(noPaste: NoPaste, entry: var NoPasteEntry) =
   if entry.volatile:
+    noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(entry)
 
 proc raw*(noPaste: NoPaste, ctx: Context) {.async.} =
@@ -211,7 +268,7 @@ proc main() =
   var noPaste = newNoPaste()
   noPaste.init()
   var middlewares: seq[HandlerAsync] = @[]
-  let settings = newSettings(appName = "NoPaste", debug = debug)
+  let settings = newSettings(appName = "NoPaste", debug = debug, staticDirs = ["static"])
   if debug:
     middlewares.add debugRequestMiddleware()
   var app = newApp(settings = settings, errorHandlerTable=newErrorHandlerTable(), middlewares = middlewares)
