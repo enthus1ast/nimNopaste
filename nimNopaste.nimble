@@ -13,5 +13,5 @@ bin           = @["nimNopaste"]
 requires "nim >= 1.2.6"
 requires "norm"
 requires "https://github.com/enthus1ast/nim-hashids.git"
-requires "https://github.com/enthus1ast/prologue.git"
+requires "prologue"
 requires "karax"
