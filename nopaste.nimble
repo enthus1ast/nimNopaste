@@ -5,7 +5,6 @@ author        = "David Krause"
 description   = "a simple nopaste"
 license       = "MIT"
 srcDir        = "src"
-bin           = @["nopaste"]
 
 
 # Dependencies
