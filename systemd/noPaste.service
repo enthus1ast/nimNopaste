@@ -1,9 +1,9 @@
 [Unit]
-AssertPathExists=/home/noPaste/noPaste
+AssertPathExists=/home/nopaste/nimNopaste
 
 [Service]
-WorkingDirectory=/home/noPaste/noPaste
-ExecStart=/home/noPaste/noPaste/nopaste
+WorkingDirectory=/home/nopaste/nimNopaste
+ExecStart=/home/noPaste/nopaste/nimNopaste/nopaste
 Restart=always
 PrivateTmp=true
 NoNewPrivileges=true
