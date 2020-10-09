@@ -7,13 +7,16 @@ import prologue/middlewares
 import prologue/middlewares/signedcookiesession
 import karax / [kbase, vdom, karaxdsl]
 import times
+import parsecfg
 
-const
-  USERNAME = "foo"
-  PASSWORD = "baa"
-  HASH_ID_SALT = "Some salt or pepper?"
+var config = loadConfig(getAppDir() / "config.ini")
 
-let uploadDir = getAppDir() / "static" / "uploads"
+let
+  USERNAME = config.getSectionValue("", "username")
+  PASSWORD = config.getSectionValue("", "password")
+  HASH_ID_SALT = config.getSectionValue("", "salt")
+  uploadDir = getAppDir() / config.getSectionValue("", "uploadDir")
+  secretKey = config.getSectionValue("", "secretKey")
 
 type
   NoPasteId = string
@@ -27,10 +30,7 @@ type
     uploadFile: string
   NoPaste = ref object
     db: DbConn
-
-# Create session key and settings
-let
-    secretKey = "SeCrEt!KeY"
+    config: Config
 
 proc loggedIn(ctx: Context): bool {.inline.} =
   ctx.session.getOrDefault("login") == $true
@@ -45,8 +45,9 @@ proc popFlash(ctx: Context): string  {.inline.} =
 proc hasFlash(ctx: Context): bool {.inline.} =
   ctx.session.getOrDefault("flash") != ""
 
-func newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
+proc newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
   result = NoPaste()
+  # result.config = loadConfig(getAppDir() / "config.ini")
   result.db = open(dbfile, "", "", "")
 
 proc init(noPaste: NoPaste) =
