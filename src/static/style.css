@@ -1,10 +1,12 @@
 body {
   font-family: monospace;
+  font-size: 1.2em;
 }
 
 #menu {
-  margin-bottom: 5px;
+  margin-bottom: 20px;
   border-bottom: solid 3px;
+  font-size: 2em;
 }
 
 #name {

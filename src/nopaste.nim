@@ -4,10 +4,15 @@ import hashids
 import sugar, options, strformat, strutils
 import prologue
 import prologue/middlewares
+import prologue/middlewares/signedcookiesession
 import karax / [kbase, vdom, karaxdsl]
 import times
 
-const HASH_ID_SALT = "Some salt or pepper?"
+const
+  USERNAME = "foo"
+  PASSWORD = "baa"
+  HASH_ID_SALT = "Some salt or pepper?"
+
 let uploadDir = getAppDir() / "static" / "uploads"
 
 type
@@ -22,6 +27,23 @@ type
     uploadFile: string
   NoPaste = ref object
     db: DbConn
+
+# Create session key and settings
+let
+    secretKey = "SeCrEt!KeY"
+
+proc loggedIn(ctx: Context): bool {.inline.} =
+  ctx.session.getOrDefault("login") == $true
+
+proc setFlash(ctx: Context, msg: string) {.inline.} =
+  ctx.session["flash"] = msg
+
+proc popFlash(ctx: Context): string  {.inline.} =
+  result = ctx.session.getOrDefault("flash")
+  ctx.session.del("flash")
+
+proc hasFlash(ctx: Context): bool {.inline.} =
+  ctx.session.getOrDefault("flash") != ""
 
 func newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
   result = NoPaste()
@@ -113,37 +135,40 @@ proc renderFilePreview(entry: NoPasteEntry): VNode =
     of ".gif", ".png", ".jpeg", ".jpg":
       img(src = entry.getUploadUri())
     of ".mp3", ".ogg", ".wav", ".opus":
-      audio:
+      audio(controls = "controls"):
         source(src = entry.getUploadUri())
     of ".mp4":
-      video:
+      video(controls = "controls"):
         source(src = entry.getUploadUri())
     of ".txt", ".json", ".jsonl":
       iframe(src = entry.getUploadUri())
     else:
       discard
 
-proc render(entry: NoPasteEntry): VNode =
+proc render(ctx: Context, entry: NoPasteEntry): VNode =
   result = buildHtml(tdiv):
-    h1:
-      text entry.name
-    tdiv:
-      text entry.noPasteId & " " & computeFromTo(entry)
-    tdiv:
-      a(href = "/raw/" & entry.noPasteId):
-        text "[raw]"
-      a(href = "/delete/" & entry.noPasteId, class="delete"):
-        text "[delete]"
-    if entry.uploadFile.len > 0:
+    tdiv(id = "meta"):
+      h1:
+        text entry.name
       tdiv:
+        text entry.noPasteId & " " & computeFromTo(entry)
+      tdiv:
+        a(href = "/raw/" & entry.noPasteId):
+          text "[raw]"
+        if ctx.loggedIn:
+          a(href = "/delete/" & entry.noPasteId, class="delete"):
+            text "[delete]"
+    if entry.uploadFile.len > 0:
+      tdiv(id = "uploads"):
         a(href = entry.getUploadUri()):
           text entry.uploadFile
         entry.renderFilePreview()
     hr()
-    pre:
-      text entry.content
+    tdiv(id = "content"):
+      pre:
+        text entry.content
 
-proc render(noPasteEntries: seq[NoPasteEntry]): VNode =
+proc render(ctx: Context, noPasteEntries: seq[NoPasteEntry]): VNode =
   result = buildHtml(tdiv):
     for entry in noPasteEntries:
       tdiv(class="entry"):
@@ -157,24 +182,39 @@ proc render(noPasteEntries: seq[NoPasteEntry]): VNode =
         a(href = "/delete/" & entry.noPasteId, class="delete"):
           text "[delete]"
 
-proc renderMenu(): VNode =
+proc renderMenu(ctx: Context): VNode =
   result = buildHtml(tdiv(id="menu")):
-    a(href = "/"): text "home"
-    a(href = "/add"): text "add"
-    a(href = "/deleteAll", class = "delete"): text "deleteAll"
+    if ctx.loggedIn():
+      a(href = "/"): text "home"
+      a(href = "/add"): text "add"
+      a(href = "/logout"): text "logout(" & ctx.session.getOrDefault("username") & ")"
+      a(href = "/deleteAll", class = "delete"): text "deleteAll" # onclick="return confirm('Are you sure?')"  # TODO onlick does not work on karax native... Error: undeclared identifier: 'addEventHandler'
+    else:
+      a(href = "/login"): text "login"
 
-proc master(content: VNode): VNode =
+proc renderLogin(): Vnode =
+  result = buildHtml(tdiv(id="login")):
+    form(`method` = "post"):
+      ul:
+        li: input(name = "username", placeholder = "username")
+        li: input(name = "password", placeholder = "password", `type` = "password")
+        li: input(`type` = "submit", value = "login")
+
+proc master(ctx: Context, content: VNode): VNode =
   result = buildHtml(html):
     head:
       link(rel="stylesheet", href="/static/style.css")
       meta(`name`="viewport", content="width=device-width, initial-scale=1.0")
     body:
-      renderMenu()
+      renderMenu(ctx)
+      if ctx.hasFlash:
+        tdiv(id = "flash"):
+          text ctx.popFlash
       content
 
 proc home*(noPaste: NoPaste, ctx: Context) {.async.} =
   var outp = ""
-  resp $master(noPaste.getAllNopasteEntry().render())
+  resp $master(ctx, render(ctx, noPaste.getAllNopasteEntry()))
 
 template getFormParam(ctx: Context, key: string): string =
   ctx.request.formParams.data[key].body
@@ -184,6 +224,26 @@ template hasUploadedFile(ctx: Context, key: string): bool =
 
 func empty(entry: NoPasteEntry): bool =
   result = (entry.name.len == 0) and (entry.content.len == 0) and (entry.uploadFile.len == 0)
+
+proc login*(noPaste: NoPaste, ctx: Context) {.async.} =
+  case ctx.request.reqMethod
+  of HttpPost:
+    let username = ctx.getFormParam("username")
+    let password = ctx.getFormParam("password")
+    if username == USERNAME and password == PASSWORD:
+      ctx.session["login"] = $true
+      ctx.session["username"] = username
+    else:
+      ctx.setFlash("wrong credentials")
+    resp redirect("/")
+  of HttpGet:
+    resp $master(ctx, renderLogin())
+  else:
+    discard
+
+proc logout*(noPaste: NoPaste, ctx: Context) {.async.} =
+  ctx.session.clear()
+  resp redirect("/")
 
 proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
   case ctx.request.reqMethod
@@ -211,6 +271,7 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
         echo getCurrentExceptionMsg()
     if not entry.empty():
       noPaste.db.insert(entry)
+      ctx.setFlash("entry added!")
     # resp redirect("/get/" & entry.noPasteId) # cannot do this because of volatile, would be deleted instantly
     resp redirect("/")
   of HttpGet:
@@ -231,7 +292,7 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
         input(`name` = "upload", id = "upload", `type` = "file")
         button(id="mysubmit"):
           text "submit"
-    resp $master(vnode)
+    resp $master(ctx, vnode)
   else:
     discard
 
@@ -254,7 +315,7 @@ proc get*(noPaste: NoPaste, ctx: Context) {.async.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
   var entryOpt = noPaste.getNopasteEntryById(noPasteId)
   if entryOpt.isSome():
-    resp $master(entryOpt.get().render())
+    resp $master(ctx, render(ctx, entryOpt.get()))
     noPaste.deleteIfVolatile(entryOpt.get())
   else:
     resp("404 :(", Http404)
@@ -262,10 +323,12 @@ proc get*(noPaste: NoPaste, ctx: Context) {.async.} =
 proc delete*(noPaste: NoPaste, ctx: Context) {.async.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
   noPaste.delete(noPasteId)
+  ctx.setFlash("entry deleted: " & $noPasteId)
   resp redirect("/")
 
 proc deleteAll*(noPaste: NoPaste, ctx: Context) {.async.} =
   noPaste.deleteAllEntries
+  ctx.setFlash("all entries deleted")
   resp redirect("/")
 
 proc doCleanup(noPaste: NoPaste) {.async.} =
@@ -273,22 +336,39 @@ proc doCleanup(noPaste: NoPaste) {.async.} =
     noPaste.deleteExpiredEntries()
     await sleepAsync(initDuration(minutes = 5).inMilliseconds().int)
 
+proc loginRequired*(loginUrl = "/login"): HandlerAsync =
+  result = proc(ctx: Context) {.async.} =
+    if not ctx.loggedIn(): #and (ctx.request.path() != loginUrl): # TODO crash
+      resp redirect(loginUrl, Http307)
+    else:
+      await switch(ctx)
+
 proc main() =
   var debug = true
   if defined release: debug = false
   var noPaste = newNoPaste()
   noPaste.init()
   var middlewares: seq[HandlerAsync] = @[]
-  let settings = newSettings(appName = "NoPaste", debug = debug, staticDirs = ["static"])
+  let settings = newSettings(secretKey = secretKey, appName = "NoPaste", debug = debug, staticDirs = ["static"])
   if debug:
     middlewares.add debugRequestMiddleware()
-  var app = newApp(settings = settings, errorHandlerTable=newErrorHandlerTable(), middlewares = middlewares)
-  app.addRoute("/", proc (ctx: Context): Future[void] {.gcsafe.} = home(noPaste, ctx), @[HttpGet, HttpPost])
-  app.addRoute("/add", proc (ctx: Context): Future[void] {.gcsafe.} = add(noPaste, ctx), @[HttpGet, HttpPost])
+  # if true:
+  #   middlewares.add loginRequired()
+  middlewares.add sessionMiddleware(settings, path = "/")
+  var app = newApp(
+    settings = settings,
+    errorHandlerTable=newErrorHandlerTable(),
+    middlewares = middlewares
+  )
+
+  app.addRoute("/", proc (ctx: Context): Future[void] {.gcsafe.} = home(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
+  app.addRoute("/login", proc (ctx: Context): Future[void] {.gcsafe.} = login(noPaste, ctx), @[HttpGet, HttpPost])
+  app.addRoute("/logout", proc (ctx: Context): Future[void] {.gcsafe.} = logout(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
+  app.addRoute("/add", proc (ctx: Context): Future[void] {.gcsafe.} = add(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
   app.addRoute("/raw/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = raw(noPaste, ctx), HttpGet)
   app.addRoute("/get/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = get(noPaste, ctx), HttpGet)
-  app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet)
-  app.addRoute("/deleteAll", proc (ctx: Context): Future[void] {.gcsafe.} = deleteAll(noPaste, ctx), HttpGet)
+  app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet, middlewares = @[loginRequired()])
+  app.addRoute("/deleteAll", proc (ctx: Context): Future[void] {.gcsafe.} = deleteAll(noPaste, ctx), HttpGet, middlewares = @[loginRequired()])
   asyncCheck noPaste.doCleanup()
   app.run()
 
