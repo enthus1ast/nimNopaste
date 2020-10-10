@@ -10,6 +10,9 @@ import karax / [kbase, vdom, karaxdsl]
 import times
 import parsecfg
 
+const
+  ENABLE_DEFLATE = true
+
 var config = loadConfig(getAppDir() / "config.ini")
 
 let
@@ -344,6 +347,30 @@ proc loginRequired*(loginUrl = "/login"): HandlerAsync =
     else:
       await switch(ctx)
 
+proc reversed(s: string): string =
+  result = newString(s.len)
+  for i,c in s:
+    result[s.high - i] = c
+
+# proc reverse*(): HandlerAsync =
+#   result = proc(ctx: Context) {.async.} =
+#     await switch(ctx)
+#     ctx.response.body = ctx.response.body.reversed()
+
+when ENABLE_DEFLATE:
+  import miniz
+  proc deflateMiddleware*(): HandlerAsync =
+    ## Compresses the response
+    result = proc(ctx: Context) {.async.} =
+      await switch(ctx)
+      if ctx.request.headers.hasKey("Accept-Encoding"):
+        let encodings = ctx.request.headers.getOrDefault("Accept-Encoding")
+        if encodings.find("deflate") != -1:
+          ctx.response.headers.add("Content-Encoding", "deflate")
+          ctx.response.headers.add("X-org-size", $ctx.response.body.len) # just for me to see the difference
+          ctx.response.body = ctx.response.body.compress()
+          ctx.response.headers.add("X-compressed-size", $ctx.response.body.len) # just for me to see the difference
+
 proc main() =
   var debug = true
   if defined release: debug = false
@@ -357,6 +384,8 @@ proc main() =
   #   middlewares.add loginRequired()
   middlewares.add sessionMiddleware(settings, path = "/")
   middlewares.add staticFileMiddleware(["static"])
+  when ENABLE_DEFLATE:
+    middlewares.add deflateMiddleware()
   var app = newApp(
     settings = settings,
     errorHandlerTable=newErrorHandlerTable(),
