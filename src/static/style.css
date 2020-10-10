@@ -30,3 +30,8 @@ body {
 
 .entry:nth-child(even) {background: #CCC}
 .entry:nth-child(odd) {background: #FFF}
+
+iframe {
+  width: 100%;
+  height: 100%;
+}

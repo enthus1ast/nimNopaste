@@ -5,6 +5,7 @@ import sugar, options, strformat, strutils
 import prologue
 import prologue/middlewares
 import prologue/middlewares/signedcookiesession
+import prologue/middlewares/staticfile
 import karax / [kbase, vdom, karaxdsl]
 import times
 import parsecfg
@@ -75,23 +76,23 @@ proc genNoPasteId(dateCreation: float): string =
   let (intpart, floatpart) = splitDecimal(dateCreation)
   result = hashids.encode(@[intpart.int, (floatpart * 1000).int])
 
-proc getExpiredEntries(noPaste: NoPaste): seq[NoPasteEntry] =
+proc getExpiredEntries(noPaste: NoPaste): seq[NoPasteEntry] {.gcsafe.} =
   let now = epochTime()
   for entry in noPaste.getAllNopasteEntry():
     if (entry.dateCreation + entry.howLongValid.float) < now:
       result.add entry
 
-proc deleteExpiredEntries(noPaste: NoPaste) =
+proc deleteExpiredEntries(noPaste: NoPaste) {.gcsafe.} =
   for entry in noPaste.getExpiredEntries():
     noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(dup(entry))
 
-proc deleteAllEntries(noPaste: NoPaste) =
+proc deleteAllEntries(noPaste: NoPaste) {.gcsafe.} =
   for entry in noPaste.getAllNopasteEntry():
     noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(dup(entry))
 
-proc updateNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId, name, content: string) =
+proc updateNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId, name, content: string) {.gcsafe.} =
   var entry = NoPasteEntry()
   noPaste.db.select(entry, "NoPasteEntry.noPasteId = ?", noPasteId)
   entry.name = name
@@ -131,7 +132,7 @@ proc computeFromTo(entry: NoPasteEntry): string =
 proc renderFilePreview(entry: NoPasteEntry): VNode =
   if entry.uploadFile.len == 0: return
   let ext = entry.uploadFile.splitFile().ext.toLowerAscii()
-  result = buildHtml(tdiv):
+  result = buildHtml(tdiv(id="preview")):
     case ext
     of ".gif", ".png", ".jpeg", ".jpg":
       img(src = entry.getUploadUri())
@@ -141,7 +142,7 @@ proc renderFilePreview(entry: NoPasteEntry): VNode =
     of ".mp4":
       video(controls = "controls"):
         source(src = entry.getUploadUri())
-    of ".txt", ".json", ".jsonl":
+    of ".txt", ".json", ".jsonl", ".pdf":
       iframe(src = entry.getUploadUri())
     else:
       discard
@@ -214,7 +215,6 @@ proc master(ctx: Context, content: VNode): VNode =
       content
 
 proc home*(noPaste: NoPaste, ctx: Context) {.async.} =
-  var outp = ""
   resp $master(ctx, render(ctx, noPaste.getAllNopasteEntry()))
 
 template getFormParam(ctx: Context, key: string): string =
@@ -226,7 +226,7 @@ template hasUploadedFile(ctx: Context, key: string): bool =
 func empty(entry: NoPasteEntry): bool =
   result = (entry.name.len == 0) and (entry.content.len == 0) and (entry.uploadFile.len == 0)
 
-proc login*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc login*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   case ctx.request.reqMethod
   of HttpPost:
     let username = ctx.getFormParam("username")
@@ -242,11 +242,11 @@ proc login*(noPaste: NoPaste, ctx: Context) {.async.} =
   else:
     discard
 
-proc logout*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc logout*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   ctx.session.clear()
   resp redirect("/")
 
-proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc add*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   case ctx.request.reqMethod
   of HttpPost:
     var howLongValid = 0
@@ -297,12 +297,12 @@ proc add*(noPaste: NoPaste, ctx: Context) {.async.} =
   else:
     discard
 
-proc deleteIfVolatile(noPaste: NoPaste, entry: var NoPasteEntry) =
+proc deleteIfVolatile(noPaste: NoPaste, entry: var NoPasteEntry) {.gcsafe.} =
   if entry.volatile:
     noPaste.deleteUploadFile(entry.noPasteId)
     noPaste.db.delete(entry)
 
-proc raw*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc raw*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
   var entryOpt = noPaste.getNopasteEntryById(noPasteId)
   if entryOpt.isSome():
@@ -312,7 +312,7 @@ proc raw*(noPaste: NoPaste, ctx: Context) {.async.} =
   else:
     resp("404 :( ", Http404)
 
-proc get*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc get*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
   var entryOpt = noPaste.getNopasteEntryById(noPasteId)
   if entryOpt.isSome():
@@ -321,18 +321,18 @@ proc get*(noPaste: NoPaste, ctx: Context) {.async.} =
   else:
     resp("404 :(", Http404)
 
-proc delete*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc delete*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
   noPaste.delete(noPasteId)
   ctx.setFlash("entry deleted: " & $noPasteId)
   resp redirect("/")
 
-proc deleteAll*(noPaste: NoPaste, ctx: Context) {.async.} =
+proc deleteAll*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   noPaste.deleteAllEntries
   ctx.setFlash("all entries deleted")
   resp redirect("/")
 
-proc doCleanup(noPaste: NoPaste) {.async.} =
+proc doCleanup(noPaste: NoPaste) {.async, gcsafe.} =
   while true:
     noPaste.deleteExpiredEntries()
     await sleepAsync(initDuration(minutes = 5).inMilliseconds().int)
@@ -350,12 +350,13 @@ proc main() =
   var noPaste = newNoPaste()
   noPaste.init()
   var middlewares: seq[HandlerAsync] = @[]
-  let settings = newSettings(secretKey = secretKey, appName = "NoPaste", debug = debug, staticDirs = ["static"])
+  let settings = newSettings(secretKey = secretKey, appName = "NoPaste", debug = debug)
   if debug:
     middlewares.add debugRequestMiddleware()
   # if true:
   #   middlewares.add loginRequired()
   middlewares.add sessionMiddleware(settings, path = "/")
+  middlewares.add staticFileMiddleware(["static"])
   var app = newApp(
     settings = settings,
     errorHandlerTable=newErrorHandlerTable(),
