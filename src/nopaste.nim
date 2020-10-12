@@ -11,7 +11,7 @@ import times
 import parsecfg
 
 const
-  ENABLE_DEFLATE = true
+  ENABLE_DEFLATE = true # enables experimental compression of responses (just 4 fun)
 
 var config = loadConfig(getAppDir() / "config.ini")
 
@@ -51,7 +51,6 @@ proc hasFlash(ctx: Context): bool {.inline.} =
 
 proc newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
   result = NoPaste()
-  # result.config = loadConfig(getAppDir() / "config.ini")
   result.db = open(dbfile, "", "", "")
 
 proc init(noPaste: NoPaste) =
@@ -157,9 +156,23 @@ proc render(ctx: Context, entry: NoPasteEntry): VNode =
         text entry.name
       tdiv:
         text entry.noPasteId & " " & computeFromTo(entry)
+      tdiv(id = "qr")
+      script():
+       verbatim """
+var qrcode = new QRCode(document.getElementById("qr"), {
+	text: window.location.href,
+	width: 128,
+	height: 128,
+	colorDark : "#000000",
+	colorLight : "#ffffff",
+	correctLevel : QRCode.CorrectLevel.H
+});
+"""
       tdiv:
-        a(href = "/raw/" & entry.noPasteId):
+        a(href = "/raw/" & entry.noPasteId, class = "raw"):
           text "[raw]"
+        a(href = "/edit/" & entry.noPasteId, class = "edit"):
+          text "[edit]"
         if ctx.loggedIn:
           a(href = "/delete/" & entry.noPasteId, class="delete"):
             text "[delete]"
@@ -177,12 +190,14 @@ proc render(ctx: Context, noPasteEntries: seq[NoPasteEntry]): VNode =
   result = buildHtml(tdiv):
     for entry in noPasteEntries:
       tdiv(class="entry"):
-        a(href = "/get/" & entry.noPasteId):
+        a(href = "/get/" & entry.noPasteId, class="get"):
           text fmt"-> {entry.name} " & computeFromTo(entry)
-        a(href = "/raw/" & entry.noPasteId):
+        a(href = "/raw/" & entry.noPasteId, class="raw"):
           text "[raw]"
+        a(href = "/edit/" & entry.noPasteId, class="edit"):
+          text "[edit]"
         if entry.uploadFile.len > 0:
-          a(href = noPaste.getUploadUri(entry)):
+          a(href = noPaste.getUploadUri(entry), class="download"):
             text "[download]"
         a(href = "/delete/" & entry.noPasteId, class="delete"):
           text "[delete]"
@@ -210,6 +225,7 @@ proc master(ctx: Context, content: VNode): VNode =
     head:
       link(rel="stylesheet", href="/static/style.css")
       meta(`name`="viewport", content="width=device-width, initial-scale=1.0")
+      script(src = "/static/qrcode.min.js")
     body:
       renderMenu(ctx)
       if ctx.hasFlash:
@@ -248,6 +264,29 @@ proc login*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
 proc logout*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   ctx.session.clear()
   resp redirect("/")
+
+proc edit*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
+  let noPasteId = ctx.getPathParams("noPasteId", "")
+  var entryOpt = noPaste.getNopasteEntryById(noPasteId)
+  if entryOpt.isNone:
+    resp "404 :(", Http404
+    return
+  var entry = entryOpt.get()
+  case ctx.request.reqMethod
+  of HttpPost:
+    let name = ctx.getFormParam("name")
+    let content = ctx.getFormParam("content")
+    noPaste.updateNopasteEntryById(noPasteId, name, content)
+    resp redirect("/")
+  of HttpGet:
+    var vnode = buildHtml(tdiv):
+      form(`method` = "post", enctype = "multipart/form-data"):
+        input(name = "name", id = "name", placeholder = "name", value = entry.name): discard
+        textarea(name = "content", id = "content", placeholder = "content", value = entry.content): discard
+        button(id="mysubmit"):
+          text "edit"
+    resp $master(ctx, vnode)
+  else: discard
 
 proc add*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   case ctx.request.reqMethod
@@ -347,16 +386,6 @@ proc loginRequired*(loginUrl = "/login"): HandlerAsync =
     else:
       await switch(ctx)
 
-proc reversed(s: string): string =
-  result = newString(s.len)
-  for i,c in s:
-    result[s.high - i] = c
-
-# proc reverse*(): HandlerAsync =
-#   result = proc(ctx: Context) {.async.} =
-#     await switch(ctx)
-#     ctx.response.body = ctx.response.body.reversed()
-
 when ENABLE_DEFLATE:
   import miniz
   proc deflateMiddleware*(): HandlerAsync =
@@ -396,6 +425,7 @@ proc main() =
   app.addRoute("/login", proc (ctx: Context): Future[void] {.gcsafe.} = login(noPaste, ctx), @[HttpGet, HttpPost])
   app.addRoute("/logout", proc (ctx: Context): Future[void] {.gcsafe.} = logout(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
   app.addRoute("/add", proc (ctx: Context): Future[void] {.gcsafe.} = add(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
+  app.addRoute("/edit/{noPasteId", proc (ctx: Context): Future[void] {.gcsafe.} = edit(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
   app.addRoute("/raw/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = raw(noPaste, ctx), HttpGet)
   app.addRoute("/get/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = get(noPaste, ctx), HttpGet)
   app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet, middlewares = @[loginRequired()])
