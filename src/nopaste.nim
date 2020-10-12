@@ -282,7 +282,8 @@ proc edit*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
     var vnode = buildHtml(tdiv):
       form(`method` = "post", enctype = "multipart/form-data"):
         input(name = "name", id = "name", placeholder = "name", value = entry.name): discard
-        textarea(name = "content", id = "content", placeholder = "content", value = entry.content): discard
+        textarea(name = "content", id = "content", placeholder = "content"):
+          text entry.content
         button(id="mysubmit"):
           text "edit"
     resp $master(ctx, vnode)
