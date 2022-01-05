@@ -1,5 +1,5 @@
 import times, math, os
-import norm/[model, sqlite]
+import norm/[model, sqlite, pragmas, types]
 import hashids
 import sugar, options, strformat, strutils
 import prologue
@@ -32,6 +32,10 @@ type
     howLongValid: int
     volatile: bool ## remove after first get
     uploadFile: string
+  ShortlinkId = string
+  ShortlinkEntry = ref object of Model
+    shortlinkId {.unique.}: ShortlinkId
+    target: string
   NoPaste = ref object
     db: DbConn
     config: Config
@@ -55,7 +59,12 @@ proc newNoPaste(dbfile = getAppDir() / "db.sqlite3"): NoPaste =
 
 proc init(noPaste: NoPaste) =
   noPaste.db.createTables(NoPasteEntry())
+  noPaste.db.createTables(ShortlinkEntry())
   if not dirExists(uploadDir): createDir(uploadDir)
+
+proc getAllShortlinksEntry(noPaste: NoPaste): seq[ShortlinkEntry] =
+  result = @[ShortlinkEntry()]
+  noPaste.db.select(result, "ShortlinkEntry.id")
 
 proc getAllNopasteEntry(noPaste: NoPaste): seq[NoPasteEntry] =
   result = @[NoPasteEntry()]
@@ -65,6 +74,15 @@ proc getNopasteEntryById(noPaste: NoPaste, noPasteId: NoPasteId): Option[NoPaste
   var entrys = @[NoPasteEntry()]
   try:
     noPaste.db.select(entrys, "NoPasteEntry.noPasteId = ?", noPasteId)
+  except:
+    return
+  if entrys.len == 0: return
+  return some(entrys[0])
+
+proc getShortlinkEntryById(noPaste: NoPaste, shortlinkId: ShortlinkId): Option[ShortlinkEntry] =
+  var entrys = @[ShortlinkEntry()]
+  try:
+    noPaste.db.select(entrys, "ShortlinkEntry.shortlinkId = ?", shortlinkId)
   except:
     return
   if entrys.len == 0: return
@@ -207,6 +225,7 @@ proc renderMenu(ctx: Context): VNode =
     if ctx.loggedIn():
       a(href = "/"): text "home"
       a(href = "/add"): text "add"
+      a(href = "/addshortlink"): text "shortlinks"
       a(href = "/logout"): text "logout(" & ctx.session.getOrDefault("username") & ")"
       a(href = "/deleteAll", class = "delete"): text "deleteAll" # onclick="return confirm('Are you sure?')"  # TODO onlick does not work on karax native... Error: undeclared identifier: 'addEventHandler'
     else:
@@ -255,7 +274,7 @@ proc login*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
       ctx.session["username"] = username
     else:
       ctx.setFlash("wrong credentials")
-    resp redirect("/")
+    resp redirect("/", Http302)
   of HttpGet:
     resp $master(ctx, renderLogin())
   else:
@@ -263,7 +282,7 @@ proc login*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
 
 proc logout*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   ctx.session.clear()
-  resp redirect("/")
+  resp redirect("/", Http302)
 
 proc edit*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   let noPasteId = ctx.getPathParams("noPasteId", "")
@@ -277,7 +296,7 @@ proc edit*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
     let name = ctx.getFormParam("name")
     let content = ctx.getFormParam("content")
     noPaste.updateNopasteEntryById(noPasteId, name, content)
-    resp redirect("/")
+    resp redirect("/", Http302)
   of HttpGet:
     var vnode = buildHtml(tdiv):
       form(`method` = "post", enctype = "multipart/form-data"):
@@ -288,6 +307,75 @@ proc edit*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
           text "edit"
     resp $master(ctx, vnode)
   else: discard
+
+proc addshortlink*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
+  case ctx.request.reqMethod
+  of HttpPost:
+    discard
+    let linkname = ctx.getFormParam("linkname").strip()
+    let target = ctx.getFormParam("target").strip()
+    if linkname.len > 0 and target.len > 0:
+      var shortlink = ShortlinkEntry(
+        shortlinkId: linkname,
+        target: target
+      )
+      try:
+        noPaste.db.insert(shortlink)
+        ctx.setFlash("shortlink added!")
+      except:
+        ctx.setFlash("could NOT add shortlink!: " & getCurrentExceptionMsg())
+    else:
+      ctx.setFlash("linkname and target must be set. Nothing added...")
+    resp redirect("/addshortlink", Http302)
+  of HttpGet:
+    var vnode = buildHtml(tdiv):
+      form(`method` = "post", enctype = "multipart/form-data"):
+        input(name = "linkname", id = "linkname", placeholder = "linkname"):
+          discard
+        input(`name` = "target", id = "target", placeholder = "target")
+        button(id="mysubmit"):
+          text "submit"
+        table:
+          tr:
+            th:
+              text "name"
+            th:
+              text "target"
+            th:
+              text "actions"
+          for shortlinkEntry in noPaste.getAllShortlinksEntry():
+            tr:
+              td:
+                a(href = "/s/" & shortlinkEntry.shortlinkId):
+                  text shortlinkEntry.shortlinkId
+              td:
+                a(href = shortlinkEntry.target):
+                  text shortlinkEntry.target
+              td:
+                a(href = "/deleteShortlink/" & shortlinkEntry.shortlinkId):
+                  text "[delete]"
+
+    resp $master(ctx, vnode)
+  else:
+    discard
+
+proc deleteShortlink*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
+  let shortlinkId = ctx.getPathParams("shortlink", "")
+  var entry = ShortlinkEntry()
+  noPaste.db.select(entry, "ShortlinkEntry.shortlinkId = ?", shortlinkId)
+  noPaste.db.delete(entry)
+  resp redirect("/addshortlink")
+
+proc followShortlink*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
+  let shortlink = ctx.getPathParams("shortlink", "")
+  var error = true
+  if shortlink.len > 0:
+    let shortlinkOpt = noPaste.getShortlinkEntryById(shortlink)
+    if shortlinkOpt.isSome:
+      error = false
+      resp redirect(shortlinkOpt.get().target, Http302)
+  if error:
+    resp "Not Found", Http404
 
 proc add*(noPaste: NoPaste, ctx: Context) {.async, gcsafe.} =
   case ctx.request.reqMethod
@@ -422,6 +510,7 @@ proc main() =
     middlewares = middlewares
   )
 
+  # Routes for nopaste
   app.addRoute("/", proc (ctx: Context): Future[void] {.gcsafe.} = home(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
   app.addRoute("/login", proc (ctx: Context): Future[void] {.gcsafe.} = login(noPaste, ctx), @[HttpGet, HttpPost])
   app.addRoute("/logout", proc (ctx: Context): Future[void] {.gcsafe.} = logout(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
@@ -431,6 +520,11 @@ proc main() =
   app.addRoute("/get/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = get(noPaste, ctx), HttpGet)
   app.addRoute("/delete/{noPasteId}", proc (ctx: Context): Future[void] {.gcsafe.} = delete(noPaste, ctx), HttpGet, middlewares = @[loginRequired()])
   app.addRoute("/deleteAll", proc (ctx: Context): Future[void] {.gcsafe.} = deleteAll(noPaste, ctx), HttpGet, middlewares = @[loginRequired()])
+
+  # Routes for shortlink
+  app.addRoute("/addshortlink", proc (ctx: Context): Future[void] {.gcsafe.} = addshortlink(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
+  app.addRoute("/deleteShortlink/{shortlink}", proc (ctx: Context): Future[void] {.gcsafe.} = deleteShortlink(noPaste, ctx), @[HttpGet, HttpPost], middlewares = @[loginRequired()])
+  app.addRoute("/s/{shortlink}", proc (ctx: Context): Future[void] {.gcsafe.} = followShortlink(noPaste, ctx), HttpGet)
   asyncCheck noPaste.doCleanup()
   app.run()
 

@@ -52,3 +52,7 @@ iframe {
   /* position: absolute;
   right: 0px; */
 }
+
+table, th, td {
+  border: 1px solid black;
+}
